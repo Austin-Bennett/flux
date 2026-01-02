@@ -1,6 +1,11 @@
+[workspace]
+members = [".", "src/flux_lib"]
+
 [package]
-name = "ferrite"
-version = "0.1.0"
+name = "flux-cli"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
+flux_lib = { path = "src/flux_lib" }
+clap = { version = "4.5.6", features = ["derive"] }
