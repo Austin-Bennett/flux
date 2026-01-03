@@ -1,4 +1,5 @@
 pub mod archive;
 pub mod logging;
-mod utils;
+pub mod utils;
+pub mod serialization;
 

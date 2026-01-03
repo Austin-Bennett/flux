@@ -1,0 +1,35 @@
+file-specific data is little-endian
+
+[header (size = 5)]
+# header must start with FLUX otherwise its not valid to parse
+FLUX 0x00 <- uncompressed
+FLUX 0x## <- compressed (todo: add byte codes for different compression methods)
+
+[sections]
+each section begins with a 4-byte ascii string denoting what section it is
+this string will be referred to as a scode from now on
+
+[data] [scode: DATA]
+size -> u64, total size of the data section
+[entry metadata (size = 37 + full_path_len + link_name_len)]
+size -> u64
+full_path_len -> u32 (byte length)
+full_path -> utf-8 byte sequence
+
+(if is folder, the next size bytes is all inside this folder)
+file_type -> u8 (0 = Regular, 1 = Directory, 2 = Symlink, 3 = Hardlink, 4 = CharDevice, 5 = BlockDevice, 6 = Fifo)
+uid -> u32
+gid -> u32
+mtime -> i64
+link_name_len -> u32 (byte length)
+link_name -> utf-8 byte sequence
+dev_major -> u32
+dev_minor -> u32
+[entry data (size = entry_metadata.size)]
+
+if (is_folder):
+[entry1 metadata...] (also could be a folder)
+[entry1 data]
+...
+else if (is_file)
+[file byte contents]

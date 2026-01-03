@@ -1,24 +1,96 @@
+use std::collections::VecDeque;
 use std::fmt::{Display, Formatter, Pointer, Write};
 use crate::logging::*;
 use std::fs;
-use std::ops::Deref;
+use std::fs::{DirEntry, Metadata};
+use std::iter::Peekable;
+use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
+use libc::regex_t;
 use crate::{err_log, fatal_log, log};
 use crate::archive::ArchiveEntry::{File, Folder};
 use crate::core::utils::Ignore;
 
+pub struct RecursiveFolderIterator {
+    to_iterate: VecDeque<PathBuf>
+}
+
+impl RecursiveFolderIterator {
+    pub fn new(path: PathBuf) -> Option<Self> {
+        if path.is_dir() {
+            let mut res = Self{ to_iterate: VecDeque::new() };
+
+            for entry in match fs::read_dir(path) {
+                Ok(d) => d,
+                Err(e) => {
+                    return None;
+                }
+            } {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return None;
+                    }
+                };
+
+                res.to_iterate.push_back(entry.path())
+            }
+
+            Some( res )
+        } else {
+            None
+        }
+    }
+}
+
+impl Iterator for RecursiveFolderIterator {
+    type Item = PathBuf;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.to_iterate.pop_front()?;
+
+
+
+        if item.is_dir() {
+            for entry in match fs::read_dir(item.clone()) {
+                Ok(d) => d,
+                Err(_) => { return Some(item) }
+            } {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => {
+                        continue;
+                    }
+                };
+
+                self.to_iterate.push_back(entry.path())
+            }
+        }
+
+        Some(item)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum FileType {
-    Regular,
+    Regular = 0,
     Directory,
     Symlink,
     HardLink,
     CharDevice,
     BlockDevice,
     Fifo,
+    Unknown = 255
+}
+
+impl Default for FileType {
+    fn default() -> Self {
+        Self::Unknown
+    }
 }
 
 impl Display for FileType {
@@ -26,11 +98,12 @@ impl Display for FileType {
         let str = match self {
             FileType::Regular => "REGULAR",
             FileType::Directory => "DIRECTORY",
-            FileType::Symlink => "SYMBOLIC LINK",
-            FileType::HardLink => "HARD LINK",
-            FileType::CharDevice => "CHAR DEVICE",
-            FileType::BlockDevice => "BLOCK DEVICE",
-            FileType::Fifo => "FIFO"
+            FileType::Symlink => "SYMLINK",
+            FileType::HardLink => "HARDLINK",
+            FileType::CharDevice => "CHARDEVICE",
+            FileType::BlockDevice => "BLOCKDEVICE",
+            FileType::Fifo => "FIFO",
+            FileType::Unknown => "UNKNOWN",
         };
 
         f.write_str(str)
@@ -38,20 +111,61 @@ impl Display for FileType {
 }
 
 pub struct FileMetadata {
-    parent_path: String, //the relative path in the archive
-    name: String, //separate from path for finding purposes
-    file_type: FileType,
-    size: Option<u64>,
-    uid: u32,
-    gid: u32,
-    mtime: i64,
-    link_name: Option<String>,
-    dev_major: Option<u32>,
-    dev_minor: Option<u32>,
+    pub parent_path: String, //the relative path in the archive
+    pub name: String, //separate from path for finding purposes
+    pub file_type: FileType,
+    pub size: Option<u64>, //subject to change when we actually read the file
+    pub uid: u32,
+    pub gid: u32,
+    pub mtime: i64,
+    pub link_name: Option<String>,
+    pub dev_major: Option<u32>,
+    pub dev_minor: Option<u32>,
 }
 
 
+
+impl Default for FileMetadata {
+    fn default() -> Self {
+        Self{
+            parent_path: String::new(),
+            name: String::new(),
+            file_type: FileType::Unknown,
+            size: None,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            link_name: None,
+            dev_major: None,
+            dev_minor: None
+        }
+    }
+}
+
 impl FileMetadata {
+
+    pub fn full_path(&self) -> String {
+        let mut path = self.parent_path.clone();
+        path = path + "/" + self.name.as_str();
+
+        path
+    }
+
+    pub fn simple(parent_path: String, name: String, file_type: FileType) -> Self {
+        Self{
+            parent_path,
+            name,
+            file_type,
+            size: None,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            link_name: None,
+            dev_major: None,
+            dev_minor: None
+        }
+    }
+
     pub fn retrieve(path: &PathBuf) -> Option<Self> {
 
         let pathstr = path.to_str().unwrap_or("{invalid path}");
@@ -223,102 +337,356 @@ pub enum ArchiveEntry {
 }
 
 impl ArchiveEntry {
-    pub fn add_file(&mut self, path: &PathBuf) -> Option<Arc<Mutex<ArchiveEntry>>> {
+   pub fn name(&self) -> String {
+       match self {
+           File(fa) => fa.name(),
+           Folder(fa) => fa.name(),
+       }
+   }
+
+    pub fn is_file(&self) -> bool {
         match self {
-            File(_) => None, //todo, error message?
-            Folder(f) => f.add_file(path)
+            File(_) => true,
+            Folder(_) => false
         }
+    }
+
+    pub fn is_folder(&self) -> bool {
+        match self {
+            File(_) => false,
+            Folder(_) => true
+        }
+    }
+
+    pub fn as_file(&self) -> Option<&FileArchive> {
+        match self {
+            Folder(fa) => None,
+            File(fa) => Some(fa)
+        }
+    }
+
+    pub fn as_file_mut(&mut self) -> Option<&mut FileArchive> {
+        match self {
+            Folder(fa) => None,
+            File(fa) => Some(fa)
+        }
+    }
+
+    pub fn as_folder(&self) -> Option<&FolderArchive> {
+        match self {
+            File(fa) => None,
+            Folder(fa) => Some(fa)
+        }
+    }
+
+    pub fn as_folder_mut(&mut self) -> Option<&mut FolderArchive> {
+        match self {
+            File(fa) => None,
+            Folder(fa) => Some(fa)
+        }
+    }
+}
+
+
+
+pub struct FileArchive {
+    pub metadata: FileMetadata,
+    pub bytes: Vec<u8>
+}
+
+impl FileArchive {
+    pub fn new(metadata: FileMetadata) -> Self {
+        Self{ metadata, bytes: Vec::new() }
+    }
+
+    pub fn empty() -> Self {
+        Self{ metadata: FileMetadata::default(), bytes: Vec::new() }
     }
 
     pub fn name(&self) -> String {
-        match self {
-            File(f) => f.metadata.name.clone(),
-            Folder(f) => f.metadata.name.clone()
-        }
+        self.metadata.name.clone()
+    }
+
+    pub fn full_path(&self) -> String {
+        self.metadata.parent_path.clone() + "/" + &*self.metadata.name
     }
 }
 
-impl Display for ArchiveEntry {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            File(fl) => fl.fmt(f),
-            Folder(fl) => fl.fmt(f, 0)
+
+
+
+pub fn canonicalize_logical(pathref: impl AsRef<Path>) -> PathBuf {
+    let path = pathref.as_ref();
+    let mut out = PathBuf::new();
+
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => { out.pop(); },
+            Component::Normal(name) => { out.push(name); }
+            Component::RootDir | Component::Prefix(_) => {}
         }
     }
+
+    out
 }
 
-pub struct FileArchive {
-    metadata: FileMetadata,
-    bytes: Vec<u8>
-}
-
-
-
-impl Display for FileArchive {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.metadata.name.as_str())
+pub fn comp_to_str(component: Component) -> Option<String> {
+    match component {
+        Component::Normal(n) => { match n.to_str() {
+            Some(s) => Some(String::from(s)),
+            None => {
+                None
+            }
+        } }
+        Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir =>
+            { /* shouldnt happen bcus of canonicalize_logical */ Some(String::from("it still happened stupid")) }
     }
 }
 
 pub struct FolderArchive {
-    metadata: FileMetadata,
-    contents: Vec<Arc<Mutex<ArchiveEntry>>>,
-}
-
-impl Display for FolderArchive {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        self.fmt(f, 0)
-    }
+    pub metadata: FileMetadata, //so we can also use FolderArchive as a regular container
+    pub contents: Vec<Arc<Mutex<ArchiveEntry>>>,
+    pub is_container: bool,
 }
 
 impl FolderArchive {
-    pub fn add_file(&mut self, path: &PathBuf) -> Option<Arc<Mutex<ArchiveEntry>>> {
-        let pathstr = path.to_str().unwrap_or("{invalid path}");
 
-        let metadata = match FileMetadata::retrieve(&path) {
+    pub fn len(&self) -> usize {
+        self.contents.len()
+    }
+
+    pub fn name(&self) -> String {
+        self.metadata.name.clone()
+    }
+    pub fn container() -> Self {
+        Self{ metadata: FileMetadata{
+            name: String::from("root"),
+            file_type: FileType::Directory,
+            ..Default::default()
+        }, contents: Vec::new(), is_container: true }
+    }
+
+    pub fn with_metadata(metadata: FileMetadata) -> Self {
+        Self { metadata, contents: Vec::new(), is_container: false }
+    }
+
+    pub fn full_path(&self) -> String {
+        self.metadata.parent_path.clone() + "/" + &*self.metadata.name
+    }
+
+    pub fn using_path(mut metadata: FileMetadata, parent_path: String, name: String) -> Self {
+        metadata.parent_path = parent_path;
+        metadata.name = name;
+
+        Self::with_metadata(metadata)
+    }
+
+    pub fn find_top_level(&self, name: &String) -> Option<Arc<Mutex<ArchiveEntry>>> {
+
+        for c in &self.contents {
+            let mut found = false;
+            {
+                let lock = c.lock().unwrap();
+                if lock.name() == *name {
+                    found = true;
+                }
+            }
+
+            if found {
+                return Some(c.clone())
+            }
+        }
+
+        None
+    }
+
+    pub fn make_metadata(&self, path: &PathBuf) -> Option<FileMetadata> {
+        let pathstr = path.to_str().unwrap_or("{invalid path}");
+        let mut metadata = match FileMetadata::retrieve(&PathBuf::from(path.to_str().unwrap_or("{invalid path}"))) {
             Some(md) => md,
             None => {
-                err_log!(false, "Failed to retrieve file metadata [path={}]", pathstr);
+                err_log!(false, "Failed to find file {} relative to the CWD", pathstr);
                 return None;
             }
         };
 
-        if metadata.file_type == FileType::Directory {
-            self.contents.push(
-                Arc::new(Mutex::new(Folder(FolderArchive{ metadata, contents: Vec::new() })))
-            );
-        } else {
-            let byte_contents = match fs::read(path) {
-                Ok(o) => o,
-                Err(e) => {
-                    err_log!(false, "Failed to read file because of error {} [path={}]", e, pathstr);
-                    return None
-                }
-            };
-            self.contents.push(Arc::new(Mutex::new(File(FileArchive{ metadata, bytes: byte_contents }))));
-        }
 
-        let ind = self.contents.len()-1;
 
-        match self.contents.get_mut(ind) {
-            Some(s) => Some(s.clone()),
-            None => None
+        //make the path relative to this folder
+        metadata.parent_path = self.full_path();
+
+        Some(metadata)
+    }
+
+    pub fn find_top_level_or_add_directly(&mut self, path: &PathBuf) -> Option<Arc<Mutex<ArchiveEntry>>>  {
+        let pathstr = path.to_str().unwrap_or("{invalid path}");
+
+        let metadata = self.make_metadata(path)?;
+
+        match self.find_top_level(&metadata.name) {
+            Some(a) => Some(a),
+            None => Some(self.add_directly(path)?)
         }
     }
 
-    pub fn fmt(&self, f: &mut Formatter<'_>, tabs: u32) -> std::fmt::Result {
-        f.write_fmt(format_args!("{}{}/", String::from(" ").repeat(tabs as usize), self.metadata.name)).ignore();
-        f.write_str("\n").ignore();
+
+
+    fn __add_directly(&mut self, filename: &PathBuf) -> Option<Arc<Mutex<ArchiveEntry>>> {
+        let pathstr = filename.to_str().unwrap_or("{invalid path}");
+        //looks for the file in the CWD
+        let metadata = self.make_metadata(filename)?;
+
+        //make sure we dont already have the file
+        if let Some(arc) = self.find_top_level(&metadata.name) {
+            err_log!(false, "Cannot add file {} directly because it already exists in directory [path={}]!", pathstr, self.full_path());
+            return None;
+        }
+
+        if metadata.file_type == FileType::Directory {
+            //we don't add folders recursively in add_directly
+            let res = Arc::new(Mutex::new(Folder( FolderArchive::with_metadata(metadata) )));
+
+            self.contents.push(res.clone());
+
+            Some(res)
+        } else {
+            let mut file = FileArchive::new(metadata);
+
+            let bytes = fs::read(filename).unwrap_or(Vec::new());
+
+            file.metadata.size = Some(bytes.len() as u64);
+
+            let res = Arc::new(Mutex::new(File( file )));
+
+            self.contents.push(res.clone());
+
+            Some(res)
+        }
+    }
+
+    pub fn add_directly(&mut self, filename: &PathBuf) -> Option<Arc<Mutex<ArchiveEntry>>> {
+        let filename = canonicalize_logical(filename);
+        self.__add_directly(&filename)
+    }
+
+    fn __add_directly_recursively(&mut self, filename: &PathBuf) -> Option<Arc<Mutex<ArchiveEntry>>> {
+        let cur = self.__add_directly(&filename)?;
+
+
+        let is_folder = cur.lock().unwrap().is_folder();
+
+        if is_folder {
+
+            if let Ok(files) = fs::read_dir(filename) {
+                for file in files {
+                    let Ok(file) = file else {
+                        continue;
+                    };
+
+                    let mut lock = cur.lock().unwrap();
+
+                    lock.as_folder_mut().unwrap().add_directly_recursively(&file.path());
+                }
+            }
+        }
+
+        Some(cur.clone())
+    }
+
+    pub fn add_directly_recursively(&mut self, filename: &PathBuf) -> Option<Arc<Mutex<ArchiveEntry>>> {
+        let filename = canonicalize_logical(filename);
+
+        self.__add_directly_recursively(&filename)
+    }
+
+
+    pub fn add(&mut self, filename: &PathBuf) -> Option<Arc<Mutex<ArchiveEntry>>>  {
+        let filename = canonicalize_logical(filename);
+        let pathstr = filename.to_str().unwrap_or("{invalid path}");
+        //get a relative path
+        let rel = if !self.is_container {
+            match filename.strip_prefix(self.full_path()) {
+                Ok(a) => a,
+                Err(e) => {
+                    err_log!(false, "Failed to add file {} because it is not relative to this folder\nnote: {}", pathstr, e.to_string());
+                    return None;
+                }
+            }
+        } else {
+            filename.as_path()
+        };
+
+
+        let mut components = rel.components().peekable();
+
+        let mut cur_path: PathBuf = if !self.is_container {
+            PathBuf::from(self.full_path())
+        } else {
+            PathBuf::new()
+        };
+
+        let mut cur = {
+            let name = comp_to_str(components.next()?)?;
+            cur_path.push(name.clone());
+
+            self.find_top_level_or_add_directly(&cur_path)?
+        };
+
+        while let Some(c) = components.next() {
+            let name = comp_to_str(c)?;
+
+            {
+                let mut lock = cur.lock().unwrap();
+
+                let is_dir = lock.is_folder();
+                if !is_dir {
+                    err_log!(false, "Failed to add path {} because one component referenced a directory when it was actually a file!", pathstr);
+                }
+
+
+                cur_path.push(name.clone());
+            }
+
+            cur = {
+                let res = cur.lock().unwrap().as_folder_mut()?.find_top_level_or_add_directly(&cur_path);
+                res?
+            }
+        }
+
+        //now if cur is a folder, we add all its contents recursively
+        let is_dir = cur.lock().unwrap().is_folder();
+
+        if is_dir {
+            if let Ok(files) = fs::read_dir(filename) {
+                for file in files {
+                    let Ok(file) = file else {
+                        continue;
+                    };
+
+                    cur.lock().unwrap().as_folder_mut()?.__add_directly_recursively(&file.path());
+                }
+            }
+        }
+
+        Some(cur)
+    }
+
+    fn format(&self, f: &mut Formatter<'_>, depth: usize) -> std::fmt::Result {
+        const TAB: &str = "••";
+        f.write_str(self.name().as_str()).ignore();
+        f.write_str("/\n").ignore();
+
         for c in &self.contents {
             let lock = c.lock().unwrap();
 
-            match lock.deref() {
-                File(fl) => {
-                    f.write_fmt(format_args!("+ {}{}",  String::from(" ").repeat((tabs+1) as usize), fl.metadata.name.clone())).ignore();
-                }
-                Folder(fl) => {
-                    fl.fmt(f, tabs + 1).ignore();
-                }
+            f.write_str(TAB.repeat(depth+1).as_str()).ignore();
+            if lock.is_file() {
+                f.write_str(
+                    lock.as_file().unwrap().name().as_str()
+                ).ignore();
+            } else {
+                lock.as_folder().unwrap().format(f, depth+1).ignore();
             }
             f.write_str("\n").ignore();
         }
@@ -327,56 +695,10 @@ impl FolderArchive {
     }
 }
 
-pub struct Archive {
-    entries: Vec<Arc<Mutex<ArchiveEntry>>>
-}
 
-impl Archive {
-    pub fn new() -> Self {
-        Self{ entries: Vec::new() }
-    }
-
-    pub fn add_file(&mut self, path: &PathBuf) -> Option<Arc<Mutex<ArchiveEntry>>> {
-        let pathstr = path.to_str().unwrap_or("{invalid path}");
-
-        let metadata = match FileMetadata::retrieve(&path) {
-            Some(md) => md,
-            None => {
-                err_log!(false, "Failed to retrieve file metadata [path={}]", pathstr);
-                return None;
-            }
-        };
-
-        if metadata.file_type == FileType::Directory {
-            self.entries.push(
-                Arc::new(Mutex::new(Folder(FolderArchive{ metadata, contents: Vec::new() })))
-            );
-        } else {
-            let byte_contents = match fs::read(path) {
-                Ok(o) => o,
-                Err(e) => {
-                    err_log!(false, "Failed to read file because of error {} [path={}]", e, pathstr);
-                    return None
-                }
-            };
-            self.entries.push(Arc::new(Mutex::new(File(FileArchive{ metadata, bytes: byte_contents }))));
-        }
-
-        let ind = self.entries.len()-1;
-
-        match self.entries.get_mut(ind) {
-            Some(s) => Some(s.clone()),
-            None => None
-        }
-    }
-}
-
-impl Display for Archive {
+impl Display for FolderArchive {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        for entry in &self.entries {
-            entry.lock().unwrap().fmt(f).ignore();
-        }
-
-        Ok(())
+        self.format(f, 0)
     }
 }
+
