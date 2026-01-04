@@ -75,7 +75,7 @@ pub struct Arguments {
     #[arg(short, long, default_value = "\0")]
     pub find: String,
 
-    #[arg(short, long, default_value = "archive.flux")]
+    #[arg(short, long, default_value = "\0")]
     pub output: String,
 
     pub patterns: Vec<String> //contains files/patterns

@@ -5,6 +5,8 @@ file-specific data is little-endian
 FLUX 0x00 <- uncompressed
 FLUX 0x## <- compressed (todo: add byte codes for different compression methods)
 
+checksum <- u64 (CRC64/ISO checksum)
+
 [sections]
 each section begins with a 4-byte ascii string denoting what section it is
 this string will be referred to as a scode from now on
@@ -21,6 +23,7 @@ file_type -> u8 (0 = Regular, 1 = Directory, 2 = Symlink, 3 = Hardlink, 4 = Char
 uid -> u32
 gid -> u32
 mtime -> i64
+mode -> u32
 link_name_len -> u32 (byte length)
 link_name -> utf-8 byte sequence
 dev_major -> u32

@@ -1,17 +1,15 @@
+use std::io::Write as write_trait;
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter, Pointer, Write};
 use crate::logging::*;
-use std::fs;
-use std::fs::{DirEntry, Metadata};
-use std::iter::Peekable;
-use std::ops::{Deref, DerefMut};
-use std::os::unix::fs::MetadataExt;
+use std::{env, fs, io};
+use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
-use libc::regex_t;
-use crate::{err_log, fatal_log, log};
+use crate::{err_log, log};
 use crate::archive::ArchiveEntry::{File, Folder};
+use crate::archive::FileType::{BlockDevice, CharDevice, Directory, Fifo, HardLink, Regular, Symlink, Unknown};
 use crate::core::utils::Ignore;
 
 pub struct RecursiveFolderIterator {
@@ -78,13 +76,28 @@ impl Iterator for RecursiveFolderIterator {
 #[repr(u8)]
 pub enum FileType {
     Regular = 0,
-    Directory,
-    Symlink,
-    HardLink,
-    CharDevice,
-    BlockDevice,
-    Fifo,
+    Directory = 1,
+    Symlink = 2,
+    HardLink = 3,
+#[cfg(unix)] CharDevice = 4,
+#[cfg(unix)] BlockDevice = 5,
+#[cfg(unix)] Fifo = 6,
     Unknown = 255
+}
+
+impl From<u8> for FileType {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Regular,
+            1 => Directory,
+            2 => Symlink,
+            3 => HardLink,
+#[cfg(unix)] 4 => CharDevice,
+#[cfg(unix)] 5 => BlockDevice,
+#[cfg(unix)] 6 => Fifo,
+            _ => Unknown
+        }
+    }
 }
 
 impl Default for FileType {
@@ -100,9 +113,9 @@ impl Display for FileType {
             FileType::Directory => "DIRECTORY",
             FileType::Symlink => "SYMLINK",
             FileType::HardLink => "HARDLINK",
-            FileType::CharDevice => "CHARDEVICE",
-            FileType::BlockDevice => "BLOCKDEVICE",
-            FileType::Fifo => "FIFO",
+#[cfg(unix)] FileType::CharDevice => "CHARDEVICE",
+#[cfg(unix)] FileType::BlockDevice => "BLOCKDEVICE",
+#[cfg(unix)] FileType::Fifo => "FIFO",
             FileType::Unknown => "UNKNOWN",
         };
 
@@ -118,6 +131,7 @@ pub struct FileMetadata {
     pub uid: u32,
     pub gid: u32,
     pub mtime: i64,
+    pub mode: Option<u32>,
     pub link_name: Option<String>,
     pub dev_major: Option<u32>,
     pub dev_minor: Option<u32>,
@@ -136,6 +150,7 @@ impl Default for FileMetadata {
             gid: 0,
             mtime: 0,
             link_name: None,
+            mode: None,
             dev_major: None,
             dev_minor: None
         }
@@ -160,6 +175,7 @@ impl FileMetadata {
             uid: 0,
             gid: 0,
             mtime: 0,
+            mode: None,
             link_name: None,
             dev_major: None,
             dev_minor: None
@@ -186,6 +202,19 @@ impl FileMetadata {
 
         log!(true, "Successfully read file metadata [path={}]", pathstr);
 
+
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        
+        #[cfg(unix)]
+        let mode = Some(metadata.permissions().mode());
+        
+        #[cfg(not(unix))]
+        let mode = None;
+        
+
         let file_type = metadata.file_type();
 
         // --- determine logical file type
@@ -196,16 +225,18 @@ impl FileMetadata {
         } else if file_type.is_symlink() {
             FileType::Symlink
         } else {
+            #[cfg(unix)] {
 
-            // unix-specific special files
-            let mode = metadata.mode() & libc::S_IFMT;
-            match mode {
-                libc::S_IFCHR => FileType::CharDevice,
-                libc::S_IFBLK => FileType::BlockDevice,
-                libc::S_IFIFO => FileType::Fifo,
-                _ => {
-                    err_log!(false, "Unsupported file type {}, [path={}] skipping...", mode, pathstr);
-                    return None;
+                // unix-specific special files
+                let mode = metadata.mode() & libc::S_IFMT;
+                match mode {
+                    libc::S_IFCHR => FileType::CharDevice,
+                    libc::S_IFBLK => FileType::BlockDevice,
+                    libc::S_IFIFO => FileType::Fifo,
+                    _ => {
+                        err_log!(false, "Unsupported file type {}, [path={}] skipping...", mode, pathstr);
+                        return None;
+                    }
                 }
             }
         };
@@ -299,7 +330,7 @@ impl FileMetadata {
             , pathstr);
 
         // --- device numbers
-        let (dev_major, dev_minor) = match file_type {
+        #[cfg(unix)] let (dev_major, dev_minor) = match file_type {
             FileType::CharDevice | FileType::BlockDevice => {
                 let rdev = metadata.rdev();
                 (
@@ -310,7 +341,7 @@ impl FileMetadata {
             _ => (None, None),
         };
 
-        log!(true, "Dev major: {}, Dev minor: {}, [path={}]", dev_major.unwrap_or(u32::MAX)
+        #[cfg(unix)] log!(true, "Dev major: {}, Dev minor: {}, [path={}]", dev_major.unwrap_or(u32::MAX)
             , dev_minor.unwrap_or(u32::MAX)
             , pathstr);
 
@@ -325,8 +356,9 @@ impl FileMetadata {
             gid,
             mtime,
             link_name,
-            dev_major,
-            dev_minor,
+            mode,
+#[cfg(unix)] dev_major, #[cfg(not(unix))] None,
+#[cfg(unix)] dev_minor, #[cfg(not(unix))] None,
         } )
     }
 }
@@ -337,6 +369,14 @@ pub enum ArchiveEntry {
 }
 
 impl ArchiveEntry {
+    
+    pub fn fullpath(&self) -> String {
+        match self { 
+            File(fa) => fa.full_path(),
+            Folder(fa) => fa.full_path()
+        }
+    }
+    
    pub fn name(&self) -> String {
        match self {
            File(fa) => fa.name(),
@@ -543,7 +583,7 @@ impl FolderArchive {
             return None;
         }
 
-        if metadata.file_type == FileType::Directory {
+        if metadata.file_type == Directory {
             //we don't add folders recursively in add_directly
             let res = Arc::new(Mutex::new(Folder( FolderArchive::with_metadata(metadata) )));
 
@@ -556,6 +596,7 @@ impl FolderArchive {
             let bytes = fs::read(filename).unwrap_or(Vec::new());
 
             file.metadata.size = Some(bytes.len() as u64);
+            file.bytes = bytes;
 
             let res = Arc::new(Mutex::new(File( file )));
 
@@ -609,7 +650,8 @@ impl FolderArchive {
             match filename.strip_prefix(self.full_path()) {
                 Ok(a) => a,
                 Err(e) => {
-                    err_log!(false, "Failed to add file {} because it is not relative to this folder\nnote: {}", pathstr, e.to_string());
+                    err_log!(false, "Failed to add file {} because it is not relative to this folder [{}]\nnote: {}", pathstr, self.full_path()
+                        , e.to_string());
                     return None;
                 }
             }
@@ -693,12 +735,111 @@ impl FolderArchive {
 
         Ok(())
     }
-}
 
+    pub fn flatten(&self) -> Vec<Arc<Mutex<ArchiveEntry>>> {
+        let mut res = Vec::new();
+
+        let mut stack: Vec<_> = self.contents
+            .iter()
+            .map(
+                |c| c.clone()
+            )
+            .collect();
+
+        while let Some(item) = stack.pop() {
+
+            res.push(item.clone());
+
+            let is_dir = item.lock().unwrap().is_folder();
+
+            if is_dir {
+                stack.extend(
+                    item.lock().unwrap().as_folder().unwrap().contents.clone()
+                );
+            }
+        }
+
+        res
+    }
+
+
+
+    pub fn output_directory(&self) -> io::Result<()> {
+        use filetime::*;
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        #[cfg(unix)]
+        use nix::unistd::{chown, Uid, Gid};
+
+        let cwd = env::current_dir()?.to_string_lossy().to_string();
+
+        let dir_path = PathBuf::from(cwd.clone() + self.full_path().as_str());
+        fs::create_dir_all(dir_path.clone())?;
+
+
+        for file in &self.contents {
+            let lock = file.lock().unwrap();
+
+            match lock.deref() {
+                File(filearc) => {
+                    let path = PathBuf::from(cwd.clone() + filearc.full_path().as_str());
+                    let mut output_file = fs::File::create(&path)?;
+                    output_file.write(filearc.bytes.as_slice())?;
+
+                    let mtime = FileTime::from_unix_time(self.metadata.mtime, 0);
+                    set_file_times(&path, mtime, mtime)?;
+
+                    #[cfg(unix)]
+                    {
+                        if let Some(mode) = self.metadata.mode {
+                            let mut perms = fs::metadata(&path)?.permissions();
+                            perms.set_mode(mode);
+                            fs::set_permissions(&path, perms)?;
+                        }
+
+                        let _ = chown(
+                            &path,
+                            Some(Uid::from_raw(self.metadata.uid)),
+                            Some(Gid::from_raw(self.metadata.gid))
+                        );
+                    }
+
+                }
+                Folder(folderarc) => {
+                    folderarc.output_directory()?;
+
+
+                }
+            }
+
+
+
+        }
+
+        let mtime = FileTime::from_unix_time(self.metadata.mtime, 0);
+        set_file_times(&dir_path, mtime, mtime)?;
+
+        #[cfg(unix)]
+        {
+            if let Some(mode) = self.metadata.mode {
+                let mut perms = fs::metadata(&dir_path)?.permissions();
+                perms.set_mode(mode);
+                fs::set_permissions(&dir_path, perms)?;
+            }
+
+            let _ = chown(
+                &dir_path,
+                Some(Uid::from_raw(self.metadata.uid)),
+                Some(Gid::from_raw(self.metadata.gid))
+            );
+        }
+
+        Ok(())
+    }
+}
 
 impl Display for FolderArchive {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         self.format(f, 0)
     }
 }
-

@@ -1,11 +1,12 @@
 [workspace]
-members = [".", "src/flux_lib"]
+members = [".", "src/fluxcore"]
 
 [package]
-name = "flux-cli"
+name = "flux"
 version = "1.0.0"
 edition = "2024"
 
 [dependencies]
-flux_lib = { path = "src/flux_lib" }
+fluxcore = { path = "src/fluxcore" }
 clap = { version = "4.5.6", features = ["derive"] }
+glob = "0.3.3"

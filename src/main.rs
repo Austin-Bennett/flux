@@ -18,50 +18,125 @@ ________________________________________________________________________
 |   |____|         |____________\ \____________/ /____/       \____\   |
 |________________________________________________CLI_tool______________|
 */
-use crate::flux_lib::logging::fatal_log;
-use crate::flux_lib::logging::err_log;
+use std::{env, fs};
+use std::ffi::{OsStr, OsString};
+use crate::fluxcore::logging::fatal_log;
+use crate::fluxcore::logging::err_log;
 use std::path::PathBuf;
 use std::process::exit;
+use std::thread::sleep;
+use std::time::Duration;
 use clap::{Command, Parser};
+use glob::glob;
 use crate::cli_core::CLIOperation;
-use flux_lib;
-use flux_lib::archive::FolderArchive;
-use flux_lib::{err_log, fatal_log, log};
-use flux_lib::logging::log;
-use flux_lib::serialization::{CompressionMode, FluxFile};
+use fluxcore;
+use fluxcore::archive::{FileMetadata, FolderArchive, RecursiveFolderIterator};
+use fluxcore::{err_log, fatal_log, log};
+use fluxcore::logging::{log, ProgressLogger};
+use fluxcore::serialization::{CompressionMode, FluxFile};
+use fluxcore::utils::{Ignore, ProgressTracker};
 use crate::cli_core::CLIOperation::*;
 
 mod cli_core;
 
 fn main() {
-    let arguments = cli_core::Arguments::parse();
+    let mut arguments = cli_core::Arguments::parse();
 
     if arguments.verbose {
-        flux_lib::logging::enable_verbose_logging();
+        fluxcore::logging::enable_verbose_logging();
         log!(false, "Verbose logging enabled");
     }
 
     // log(format!("Operation mode: {}", arguments.get_operation()).as_str(), false);
     log!(false, "Operation mode: {}", arguments.get_operation());
 
+
     match arguments.get_operation() {
         Archive => {
-            //todo: loading bars
-            let mut archive = FolderArchive::container();
 
-            for file in arguments.patterns {
-                match archive.add(&PathBuf::from(file)) {
-                    Some(_) => {},
-                    None => {
-                        panic!("Archive operation failed!");
+            //first load all the files according to the patterns vector
+            let mut files: Vec<PathBuf> = Vec::new();
+
+            for p in &arguments.patterns {
+                for entry in match glob(&p) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        err_log!(false, "Bad glob pattern {}, skipping over it...", p);
+                        continue;
+                    }
+                } {
+                    match entry {
+                        Ok(path) => {
+                            let path =
+                                PathBuf::from(path);
+                            if path == PathBuf::from(".") {
+                                //add all the files in the cwd instead
+                                for f in fs::read_dir(env::current_dir().unwrap()).unwrap() {
+                                    if let Ok(f) = f {
+                                        files.push(f.path().strip_prefix(env::current_dir().unwrap()).unwrap().to_path_buf());
+                                    }
+                                }
+                            } else if path == PathBuf::from("..") {
+                                err_log!(false, "Cannot add files not relative to the CWD to an archive!\nnote: \
+                                you can to a different directory and use [-a] to add another file, skipping...");
+                            } else {
+                                files.push(path);
+                            }
+                        },
+                        Err(e) => {
+                            err_log!(false, "Encountered error when iterating through glob entries for {}: {}\n\
+                            skipping over it...",
+                            p, e.to_string());
+                            continue;
+                        }
                     }
                 }
             }
-            if arguments.verbose {
-                println!("=== file structure ===\n{}", archive);
+
+
+
+            let cur_metadata = match FileMetadata::retrieve(&PathBuf::from(env::current_dir().unwrap())) {
+                Some(md) => md,
+                None => {
+                    fatal_log!("Failed to get CWD metadata");
+                }
+            };
+
+
+
+            let mut archive = FolderArchive::with_metadata(
+                cur_metadata
+            );
+
+            archive.metadata.parent_path = String::new();
+            archive.is_container = true;
+
+            //exit(0);
+            let mut pt = ProgressTracker::new(files.len() as u64);
+
+            for file in &files {
+                let pathstr = file.to_str().unwrap_or("{invalid path}");
+
+
+                log!(true, "Adding file {} to archive", pathstr);
+                match archive.add(&file) {
+                    Some(_) => {},
+                    None => {
+                        fatal_log!("Archive operation failed!");
+                    }
+                }
+                pt.inc();
+                println!("{}/{} ({:.1}%) files found", pt.cur(), pt.max(), pt.percent()*100.0);
             }
+
+
             log!(false, "Outputting archive...");
             let flux_archive = FluxFile::serialize(archive, CompressionMode::None);
+
+            if arguments.output == "\0" {
+                arguments.output = String::from("archive.flux");
+            }
+
             match flux_archive.unwrap().save(arguments.output) {
                 Ok(()) => {},
                 Err(e) => {
@@ -71,7 +146,17 @@ fn main() {
             log!(false, "Successfully created archive!");
         }
         Unarchive => {
-            todo!()
+            let loc = PathBuf::from(arguments.unarchive);
+            
+            let archive = FluxFile::load(loc).unwrap().deserialize().unwrap();
+
+            println!("Loaded archive: {}", archive);
+            match archive.output_directory() {
+                Ok(()) => {},
+                Err(e) => {
+                    fatal_log!("Failed to output full contents because of error: {}", e.to_string())
+                }
+            }
         }
         Add => {
             todo!()
