@@ -2,7 +2,14 @@
 name = "fluxcore"
 version = "1.0.0"
 edition = "2024"
-
+authors = ["Austin Bennett <theaustinbennett@gmail.com>"]
+description = "A rust library that provides similar functionality to GNU-tar"
+license = "MIT"
+repository = "https://github.com/Austin-Bennett/flux"
+documentation = "todo"
+readme = "README.md"
+keywords = ["archive", "tar", "compression", "backup"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 lazy_static = "1.5.0"
