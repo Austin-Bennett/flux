@@ -150,7 +150,7 @@ impl Default for FileMetadata {
             gid: 0,
             mtime: 0,
             link_name: None,
-            mode: None,
+            mode: Some(0o777),
             dev_major: None,
             dev_minor: None
         }
