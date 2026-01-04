@@ -18,24 +18,19 @@ ________________________________________________________________________
 |   |____|         |____________\ \____________/ /____/       \____\   |
 |________________________________________________CLI_tool______________|
 */
-use std::{env, fs};
-use std::ffi::{OsStr, OsString};
-use crate::fluxcore::logging::fatal_log;
-use crate::fluxcore::logging::err_log;
-use std::path::PathBuf;
-use std::process::exit;
-use std::thread::sleep;
-use std::time::Duration;
-use clap::{Command, Parser};
-use glob::glob;
-use crate::cli_core::CLIOperation;
-use fluxcore;
-use fluxcore::archive::{FileMetadata, FolderArchive, RecursiveFolderIterator};
-use fluxcore::{err_log, fatal_log, log};
-use fluxcore::logging::{log, ProgressLogger};
-use fluxcore::serialization::{CompressionMode, FluxFile};
-use fluxcore::utils::{Ignore, ProgressTracker};
 use crate::cli_core::CLIOperation::*;
+use crate::fluxcore::logging::err_log;
+use crate::fluxcore::logging::fatal_log;
+use clap::Parser;
+use fluxcore;
+use fluxcore::archive::{FileMetadata, FolderArchive};
+use fluxcore::logging::log;
+use fluxcore::serialization::FluxFile;
+use fluxcore::utils::ProgressTracker;
+use fluxcore::{err_log, fatal_log, log};
+use glob::glob;
+use std::path::PathBuf;
+use std::{env, fs};
 
 mod cli_core;
 
@@ -57,10 +52,12 @@ fn main() {
             //first load all the files according to the patterns vector
             let mut files: Vec<PathBuf> = Vec::new();
 
+
+
             for p in &arguments.patterns {
                 for entry in match glob(&p) {
                     Ok(g) => g,
-                    Err(e) => {
+                    Err(_) => {
                         err_log!(false, "Bad glob pattern {}, skipping over it...", p);
                         continue;
                     }
@@ -131,7 +128,7 @@ fn main() {
 
 
             log!(false, "Outputting archive...");
-            let flux_archive = FluxFile::serialize(archive, CompressionMode::None);
+            let flux_archive = FluxFile::serialize(archive, arguments.compress);
 
             if arguments.output == "\0" {
                 arguments.output = String::from("archive.flux");

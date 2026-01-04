@@ -1,6 +1,6 @@
 use std::io::Write as write_trait;
 use std::collections::VecDeque;
-use std::fmt::{Display, Formatter, Pointer, Write};
+use std::fmt::{Display, Formatter};
 use crate::logging::*;
 use std::{env, fs, io};
 use std::ops::Deref;
@@ -23,13 +23,13 @@ impl RecursiveFolderIterator {
 
             for entry in match fs::read_dir(path) {
                 Ok(d) => d,
-                Err(e) => {
+                Err(_) => {
                     return None;
                 }
             } {
                 let entry = match entry {
                     Ok(e) => e,
-                    Err(e) => {
+                    Err(_) => {
                         return None;
                     }
                 };
@@ -334,8 +334,8 @@ impl FileMetadata {
             FileType::CharDevice | FileType::BlockDevice => {
                 let rdev = metadata.rdev();
                 (
-                    Some(unsafe { libc::major(rdev) }),
-                    Some(unsafe { libc::minor(rdev) }),
+                    Some( libc::major(rdev) ),
+                    Some( libc::minor(rdev) ),
                 )
             }
             _ => (None, None),
@@ -400,28 +400,28 @@ impl ArchiveEntry {
 
     pub fn as_file(&self) -> Option<&FileArchive> {
         match self {
-            Folder(fa) => None,
+            Folder(_) => None,
             File(fa) => Some(fa)
         }
     }
 
     pub fn as_file_mut(&mut self) -> Option<&mut FileArchive> {
         match self {
-            Folder(fa) => None,
+            Folder(_) => None,
             File(fa) => Some(fa)
         }
     }
 
     pub fn as_folder(&self) -> Option<&FolderArchive> {
         match self {
-            File(fa) => None,
+            File(_) => None,
             Folder(fa) => Some(fa)
         }
     }
 
     pub fn as_folder_mut(&mut self) -> Option<&mut FolderArchive> {
         match self {
-            File(fa) => None,
+            File(_) => None,
             Folder(fa) => Some(fa)
         }
     }
@@ -560,7 +560,6 @@ impl FolderArchive {
     }
 
     pub fn find_top_level_or_add_directly(&mut self, path: &PathBuf) -> Option<Arc<Mutex<ArchiveEntry>>>  {
-        let pathstr = path.to_str().unwrap_or("{invalid path}");
 
         let metadata = self.make_metadata(path)?;
 
@@ -578,7 +577,7 @@ impl FolderArchive {
         let metadata = self.make_metadata(filename)?;
 
         //make sure we dont already have the file
-        if let Some(arc) = self.find_top_level(&metadata.name) {
+        if let Some(_) = self.find_top_level(&metadata.name) {
             err_log!(false, "Cannot add file {} directly because it already exists in directory [path={}]!", pathstr, self.full_path());
             return None;
         }
@@ -679,7 +678,7 @@ impl FolderArchive {
             let name = comp_to_str(c)?;
 
             {
-                let mut lock = cur.lock().unwrap();
+                let lock = cur.lock().unwrap();
 
                 let is_dir = lock.is_folder();
                 if !is_dir {

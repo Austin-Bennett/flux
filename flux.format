@@ -3,7 +3,7 @@ file-specific data is little-endian
 [header (size = 5)]
 # header must start with FLUX otherwise its not valid to parse
 FLUX 0x00 <- uncompressed
-FLUX 0x## <- compressed (todo: add byte codes for different compression methods)
+FLUX 0x01 <- compressed
 
 checksum <- u64 (CRC64/ISO checksum)
 

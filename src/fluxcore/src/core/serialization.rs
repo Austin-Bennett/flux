@@ -1,18 +1,19 @@
-use crate::logging::{log, ProgressLogger};
-use std::fs::File;
+use crate::archive::ArchiveEntry::Folder;
+use crate::archive::{ArchiveEntry, FileArchive, FileMetadata, FileType, FolderArchive};
 use crate::logging::err_log;
+use crate::logging::fatal_log;
+use crate::logging::{log, ProgressLogger};
+use crate::utils::{Ignore, ProgressTracker};
+use crate::{err_log, fatal_log, log};
+use crc64::crc64;
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::{Cursor, Write};
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::{fs, io, ptr};
-use std::ffi::OsString;
-use std::io::{Error, Write};
 use std::sync::{Arc, Mutex};
-use crc64::crc64;
-use crate::archive::{ArchiveEntry, FileArchive, FileMetadata, FileType, FolderArchive};
-use crate::{err_log, log};
-use crate::archive::ArchiveEntry::{Folder};
-use crate::utils::{Ignore, ProgressTracker};
+use std::{fs, io, ptr};
 
 pub struct Bytes {
     buf: Vec<u8>,
@@ -135,21 +136,27 @@ pub struct FluxFile {
     bytes: Bytes
 }
 
-//todo: implement compression
-#[repr(u8)]
-pub enum CompressionMode {
-    Error = 255,
-    None = 0,
-}
-
-impl From<u8> for CompressionMode {
-    fn from(value: u8) -> Self {
-        match value {
-            0 => CompressionMode::None,
-            _ => CompressionMode::Error,
-        }
-    }
-}
+// #[repr(u8)]
+// #[derive(Copy, Clone)]
+// pub enum CompressionMode {
+//     Error = 255,
+//     None = 0,
+//     Bzip2 = 1,
+//     Gzip = 2,
+//     Zlib = 3
+// }
+//
+// impl From<u8> for CompressionMode {
+//     fn from(value: u8) -> Self {
+//         match value {
+//             0 => CompressionMode::None,
+//             1 => CompressionMode::Bzip2,
+//             2 => CompressionMode::Gzip,
+//             3 => CompressionMode::Zlib,
+//             _ => CompressionMode::Error,
+//         }
+//     }
+// }
 
 const HEADER_SIZE: usize = 13;
 
@@ -162,7 +169,6 @@ impl FluxFile {
     }
 
     pub fn load(filename: impl AsRef<Path>) -> Result<Self, String> {
-        let pthstr = filename.as_ref().to_str().unwrap_or("{invalid path}");
 
         //loads the file, checks that the file is well-formed and decompresses if needed
         let bytes = match fs::read(filename) {
@@ -178,19 +184,23 @@ impl FluxFile {
             return Err("File is too small to be an archive".to_string());
         }
 
-        //check that the file is well formed by parsing through the first
+        //check that the file is well-formed by parsing through the header
         if str::from_utf8(bytes.next_n(4).as_slice()).unwrap_or("") != "FLUX" {
             return Err(String::from("File is missing proper header"));
         }
 
-        let compression_mode = CompressionMode::from(bytes.next().unwrap_or(255));
-
-
+        let compression_mode = match bytes.next().unwrap_or(255) {
+            0 => { false }
+            1 => { true }
+            _ => {
+                return Err(String::from("Failed to compress data because of bad compression byte!"))
+            }
+        };
 
 
         let checksum = u64::from_le_bytes(match bytes.next_n(8).as_slice().try_into() {
             Ok(u) => u,
-            Err(e) => {
+            Err(_) => {
                 return Err("Could not get file checksum!".to_string())
             }
         });
@@ -199,35 +209,41 @@ impl FluxFile {
             return Ok(Self{ bytes })
         }
 
-        let remaining_data = &(bytes.as_slice()[HEADER_SIZE..]);
+        let remaining_data = if compression_mode {
+            match zstd::decode_all(Cursor::new(&bytes.as_slice()[HEADER_SIZE..])) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(e.to_string())
+                }
+            }
+        } else {
+            Vec::from(&bytes.as_slice()[HEADER_SIZE..])
+        };
 
-        //todo: decompression
-        match compression_mode {
-            CompressionMode::Error => {
-                return Err("Bad compression byte".to_string());
-            },
-            CompressionMode::None => {}
-        }
 
-        let crc = crc64(0, remaining_data);
+        let crc = crc64(0, remaining_data.as_slice());
 
         if crc != checksum {
             return Err(format!("Checksums do not match! ({} != {})", checksum, crc));
         }
 
+        let mut res = Bytes::new();
+        res.extend_from_slice(&bytes[0..HEADER_SIZE]);
+        res.extend(remaining_data);
+
         //at this point, the data is perfectly valid and we can go ahead and return Ok
-        Ok(Self{ bytes })
+        Ok(Self{ bytes: res })
     }
 
-    pub fn serialize(mut archive: FolderArchive, compression_mode: CompressionMode) -> Option<FluxFile> {
-        
+    pub fn serialize(mut archive: FolderArchive, compress: bool) -> Option<FluxFile> {
+
         //top-level folder should have a parent path
         archive.metadata.parent_path = String::new();
-        
+
         let mut bytes = Bytes::new();
 
         bytes.extend_from_slice("FLUX".as_bytes());
-        bytes.push(compression_mode as u8);
+        bytes.push(if compress { 1 } else { 0 });
 
 
         //folder archives are serialized as data sections, first we need to make that data
@@ -252,10 +268,21 @@ impl FluxFile {
 
         log!(true, "data CRC64/ISO checksum: {}", checksum);
 
-        //todo: compression
+
+
+        //compress the combined data
+        let compressed = if compress {
+            match zstd::encode_all(Cursor::new(combined.buf), 9) {
+                Ok(v) => v,
+                Err(e) => {
+                    fatal_log!("Failed to serialize data due to error when compressing: {}", e.to_string())
+                }
+            }
+        } else { combined.buf };
+
 
         //add the combined data
-        bytes.extend(combined);
+        bytes.extend(compressed);
 
 
         Some( Self{ bytes } )
@@ -308,8 +335,8 @@ impl FluxFile {
         res.extend_from_slice(link_name.as_bytes());
 
         //dev major
-        res.extend_from_slice(&(metadata.dev_major.unwrap_or(0)).to_le_bytes());
-        res.extend_from_slice(&(metadata.dev_minor.unwrap_or(0)).to_le_bytes());
+        res.extend_from_slice(&metadata.dev_major.unwrap_or(0).to_le_bytes());
+        res.extend_from_slice(&metadata.dev_minor.unwrap_or(0).to_le_bytes());
 
         res
     }
@@ -318,7 +345,7 @@ impl FluxFile {
     //depth is for logging purposes
     pub fn serialize_folder(archive: &FolderArchive, depth: u32) -> Result<Bytes, String> {
 
-        
+
 
         let fullpath = archive.full_path();
 
@@ -347,7 +374,7 @@ impl FluxFile {
             let lock = c.lock().unwrap();
             let bytes = match lock.deref() {
                 ArchiveEntry::File(fa) => Self::serialize_file(fa),
-                ArchiveEntry::Folder(fa) => Self::serialize_folder(fa, depth+1)?
+                Folder(fa) => Self::serialize_folder(fa, depth+1)?
             };
 
             data.extend(bytes);

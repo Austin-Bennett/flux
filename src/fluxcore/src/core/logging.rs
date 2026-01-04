@@ -1,13 +1,11 @@
+use crate::utils::Ignore;
+use crossterm::terminal::{Clear, ClearType};
+use crossterm::{cursor, QueueableCommand};
+use lazy_static::lazy_static;
 use std::io;
 use std::io::{Stdout, Write};
 use std::process::exit;
 use std::sync::Mutex;
-use std::thread::sleep;
-use std::time::{Duration, SystemTime};
-use lazy_static::lazy_static;
-use crossterm::{cursor, QueueableCommand};
-use crossterm::terminal::{Clear, ClearType};
-use crate::utils::Ignore;
 
 struct LogContext {
     verbose: bool

@@ -15,6 +15,7 @@ flux -f [--find] archive.flux pattern1.* pattern2.*         #searches in the flu
 == other options ==
 -v [--verbose] #enables more verbose logging to handle errors better
 -h [--help]    #to show this prompt again
+--compress # compresses the data
 */
 use std::fmt::Display;
 use clap::Parser;
@@ -77,6 +78,9 @@ pub struct Arguments {
 
     #[arg(short, long, default_value = "\0")]
     pub output: String,
+
+    #[arg(long, default_value = "true")]
+    pub compress: bool,
 
     pub patterns: Vec<String> //contains files/patterns
 }
