@@ -11,6 +11,10 @@ readme = "README.md"
 keywords = ["archive", "tar", "compression", "backup"]
 categories = ["command-line-utilities", "filesystem"]
 
+exclude = [
+    "target/"
+]
+
 [dependencies]
 lazy_static = "1.5.0"
 chrono = "0.4.42"
