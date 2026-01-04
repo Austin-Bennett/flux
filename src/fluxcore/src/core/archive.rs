@@ -501,7 +501,7 @@ impl FolderArchive {
     }
     pub fn container() -> Self {
         Self{ metadata: FileMetadata{
-            name: String::from("root"),
+            name: String::from("archive_root"),
             file_type: FileType::Directory,
             ..Default::default()
         }, contents: Vec::new(), is_container: true }

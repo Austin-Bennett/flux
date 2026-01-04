@@ -1,6 +1,6 @@
 [package]
 name = "fluxcore"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 authors = ["Austin Bennett <theaustinbennett@gmail.com>"]
 description = "A rust library that provides similar functionality to GNU-tar"
